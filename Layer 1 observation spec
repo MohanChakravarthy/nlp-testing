@@ -1,0 +1,186 @@
+# Layer 1 — Observation Layer: Deep-Dive Build Specification
+
+*Hand this to the coding agent (Copilot / Claude 4.6). It is a complete specification for ONE layer. Build only this. No other layer, no LLM, no real application data required to build or test it.*
+
+---
+
+## 1. Purpose & scope
+
+Build a standalone Python module that, given a live browser page, returns **one complete, structured list of every interactive element currently on screen** — including the elements that standard DOM agents silently miss. This module is the foundation of an enterprise web-exploration agent. If this layer is incomplete, every layer above it fails. Therefore it is built and validated in isolation, first.
+
+**In scope:** observe the current screen and emit a structured element list.
+**Out of scope (do NOT build):** the exploration loop, navigation, memory/graph, authentication, framework detection, any LLM call, any code generation. Those are separate later specs.
+
+---
+
+## 2. Why this layer exists (rationale the agent needs to make good choices)
+
+Standard browser agents build an indexed list of clickable elements from the DOM and act on it. On complex enterprise apps (Material UI / React / Salesforce Lightning) that list is **incomplete**, so the agent acts on the wrong element, nothing changes, and it retries forever. The list breaks for five specific reasons. This module exists to defeat all five:
+
+1. **React Portals** — MUI renders Dialogs, Menus, Select dropdowns, Tooltips and Popovers into a node appended to the end of `<body>`, detached from the trigger. A naive walk associates them wrongly or misses them.
+2. **Shadow DOM** — Salesforce Lightning and many design-system components live inside shadow roots. XPath-based paths cannot cross shadow boundaries.
+3. **Virtualization** — MUI DataGrid / react-window render only visible rows. A naive walk sees 12 rows in a 10,000-row grid.
+4. **Iframes** — embedded/legacy content (e.g. Salesforce VisualForce) lives in a separate frame context that a top-level walk ignores.
+5. **Visually identical components** — every MUI IconButton is a grey circle; pixels can't disambiguate them. Role + accessible name can.
+
+---
+
+## 3. Functional requirements — what it MUST capture, and the technique for each
+
+### 3.1 Light DOM interactive elements
+Capture: buttons, links, inputs, textareas, selects, checkboxes, radios, switches, sliders, tabs, accordions/expanders, and any element with an interactive role (`role="button"`, `role="menuitem"`, `role="tab"`, etc.) or a click handler signal.
+
+### 3.2 Open Shadow DOM — recursively
+Inject JavaScript via `page.evaluate()` that walks the document **and descends into every `element.shadowRoot`**, at every nesting level (shadow roots inside shadow roots). Reference technique (illustrative, not the final implementation):
+
+```js
+function deepCollect(root, acc) {
+  root.querySelectorAll('*').forEach(el => {
+    if (isInteractive(el)) acc.push(describe(el));
+    if (el.shadowRoot) deepCollect(el.shadowRoot, acc); // descend
+  });
+  return acc;
+}
+```
+
+- Handle **closed** shadow roots gracefully: they cannot be pierced. Detect their presence (the host exists but `shadowRoot` is null on a custom element) and record a `closed_shadow_host` marker so we know coverage is incomplete there, rather than silently dropping it.
+- Note: Playwright's CSS locator engine pierces *open* shadow roots automatically, so generated CSS locators for these elements remain usable downstream.
+
+### 3.3 Same-origin iframes
+Enumerate `page.frames()`, run the same deep walk inside each **same-origin** frame, and tag every element with its `frame_path`. For **cross-origin** frames (cannot be read), record a `cross_origin_frame` marker with no contents — again, so coverage gaps are explicit, not hidden.
+
+### 3.4 React Portals / overlays
+After the main walk, scan body-level overlay containers:
+`[role="presentation"]`, `[role="dialog"]`, `[role="menu"]`, `[role="listbox"]`, `[role="tooltip"]`, `.MuiPopover-root`, `.MuiModal-root`, `.MuiDrawer-root`.
+Tag every element found inside them with `is_overlay: true`. This is how an open menu/dialog gets correctly captured even though it lives detached at the end of `<body>`.
+
+### 3.5 Virtualized lists
+Detect a scroll container (overflow scroll/auto with `scrollHeight` much larger than `clientHeight`, or known markers like `.MuiDataGrid-virtualScroller`, `react-window` containers). Then **scroll-probe**: scroll in increments, collect newly-rendered items after each step, de-duplicate, until no new items appear or a safety cap (e.g. 500 items / 50 scrolls) is hit. Record `is_virtualized: true` and an approximate total. Never report only the initially-visible rows as the full set.
+
+### 3.6 Accessibility tree merge
+Call `page.accessibility.snapshot()` and merge `role` + accessible `name` onto the collected elements (match by bounding box / node identity). This disambiguates visually identical components and gives every element a human-meaningful label even when visible text is empty.
+
+---
+
+## 4. Module & function structure
+
+```
+observer/
+  __init__.py
+  observer.py        # orchestration: observe(page) -> ObservationResult
+  dom_walker.py      # injected-JS deep walk (light + open shadow)
+  frames.py          # same-origin iframe enumeration + walk
+  overlays.py        # portal/overlay scan + tagging
+  virtualization.py  # scroll-probe logic
+  a11y.py            # accessibility snapshot + merge
+  locators.py        # stable-locator generation
+  schema.py          # dataclasses for elements + result
+cli.py               # python cli.py <url>  -> dumps JSON
+README.md
+```
+
+**Primary entry point:**
+`observe(page) -> ObservationResult`
+- Input: a live Playwright `Page` (already navigated and, if needed, logged in).
+- Output: the structured result in §5.
+- Pure observation — it must never click, navigate, or mutate state.
+
+---
+
+## 5. Output data schema
+
+```
+ObservationResult:
+  url_hash            # hashed, NOT the raw URL (privacy — see §9)
+  captured_at
+  element_count
+  coverage_warnings   # list, e.g. ["closed_shadow_host x3", "cross_origin_frame x1"]
+  elements            # list[Element]
+
+Element:
+  index               # stable within this observation
+  tag
+  role                # from a11y tree where available
+  accessible_name
+  data_testid
+  visible_text        # may be empty
+  bbox: {x, y, w, h}
+  enabled: bool
+  is_overlay: bool
+  is_virtualized_item: bool
+  frame_path          # null if top frame
+  shadow_path         # null if light DOM
+  stable_locator      # prefer getByTestId > getByRole+name > unique CSS
+  locator_strategy    # which of the above was used
+```
+
+De-duplicate elements that appear via multiple capture passes.
+
+---
+
+## 6. Build order *within* this layer
+
+Build and self-check incrementally — don't write all six capture types then test once:
+1. Light-DOM walk + schema + CLI dump. Verify on a plain HTML page.
+2. Add a11y merge. Verify roles/names populate.
+3. Add open-shadow recursion. Verify on a web-component page.
+4. Add iframe walk. Verify on a page with a same-origin iframe.
+5. Add overlay/portal scan. Verify with an open MUI menu.
+6. Add virtualization scroll-probe. Verify on MUI DataGrid.
+
+---
+
+## 7. Environment & setup
+
+- Windows, Python 3.11+, **plain virtualenv, no Docker.**
+- `pip install playwright` then **`playwright install chromium`** (this browser-download step is mandatory and easy to forget — nothing runs without it).
+- CLI must support a headed run so the user can complete any login manually before `observe()` is called.
+
+---
+
+## 8. Acceptance tests (public pages — $0, no real app)
+
+Each must print a clear PASS/FAIL:
+1. **MUI DataGrid demo (virtualized):** rows beyond the initial viewport are captured; `is_virtualized` flagged; approximate total > visible count.
+2. **MUI Menu/Dialog demo (portals):** open the menu, run `observe()`; portalled menu items appear and are tagged `is_overlay: true`.
+3. **Open-shadow-DOM web-component page:** elements inside the shadow root appear in the output.
+4. **Same-origin iframe page:** elements inside the iframe appear with a non-null `frame_path`.
+
+---
+
+## 9. Real-app validation + sanitized failure report (the loop back)
+
+After public tests pass, the user runs `observe()` against the real enterprise app **privately, in their own environment.** No application data leaves the network.
+
+When something is wrong, the coding agent should produce a **sanitized failure report** in the format below. This contains only structural/technical facts — enough for the architect to diagnose and revise the spec — and **never** any business data.
+
+**Allowed in the report:** failure category, generic technical symptom, structural counts.
+**Forbidden in the report:** real URLs/domains, screenshots, field labels, button text, any entered or displayed data values, app or customer names.
+
+```json
+{
+  "failure_category": "PORTAL_MISSED | SHADOW_NOT_PIERCED | CLOSED_SHADOW_ROOT |
+                       IFRAME_CROSS_ORIGIN | VIRTUALIZATION_NOT_DETECTED |
+                       ELEMENT_NOT_FOUND | TIMEOUT | OTHER",
+  "symptom": "generic description, e.g. 'a menu was visually open but observe() returned 0 overlay elements'",
+  "structural_facts": {
+    "total_elements_captured": 0,
+    "frames_present": 0,
+    "same_origin_frames_captured": 0,
+    "closed_shadow_hosts": 0,
+    "elements_with_empty_accessible_name": 0
+  },
+  "coverage_warnings": ["..."]
+}
+```
+
+Example of a good report: *"Category PORTAL_MISSED. Symptom: after the bottom-right action button was clicked and a menu was visually open, observe() returned 0 elements tagged is_overlay. structural_facts: total_elements_captured 41, frames_present 0, closed_shadow_hosts 0."* — That tells the architect exactly what to fix, with zero company data.
+
+---
+
+## 10. Explicit DO NOT
+- Do not build the exploration loop, frontier, AppMap, auth, or framework detection.
+- Do not call any language model.
+- Do not containerize.
+- Do not have `observe()` click, type, or navigate — it only reads.
+- Do not include any real URL, field name, or data value in any log, test, or report.
