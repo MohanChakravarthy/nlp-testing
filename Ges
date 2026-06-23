@@ -1,0 +1,11 @@
+In the observation layer, many form inputs return accessible_name null. Add a name-resolution fallback that, when accessible_name is null, derives a name in this priority order: aria-label → aria-labelledby text → associated label[for]/wrapping label → MUI .MuiInputLabel/.MuiFormLabel
+
+text within the
+
+same.MuiFormControl-root →
+
+placeholder → name/id attribute. Add a name_source field recording which
+
+source was used, and a coverage count of how many elements still have null names afterward. Re-run
+
+obs_4_client_form and report the new null-name count and the name_source breakdown."
