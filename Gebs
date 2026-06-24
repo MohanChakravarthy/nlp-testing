@@ -1,0 +1,139 @@
+# Layer 2 — Exploration Engine: Deep-Dive Build Specification
+
+*Hand this to the coding agent. It builds ONE layer: the deterministic exploration loop. **No LLM in this layer.** The point is to prove the agent explores without looping — for $0 — before any tokens are spent (that's Layer 3).*
+
+---
+
+## 1. Purpose & scope
+
+Build the loop that drives the browser through the app, using Layer 1's `observe()` as its eyes, and produces an **AppMap graph** of the app — *without* looping, revisiting states, or hammering actions that do nothing. This layer isolates and proves the anti-loop mechanics, which are the highest risk in the whole project.
+
+**Builds on Layer 1:** imports `observe(page) -> ObservationResult`.
+
+**In scope:** state fingerprinting, visited set, frontier queue, deterministic action ranking, action execution, state-diff verification, AppMap graph construction, return-to-state, safety rails, seeded + blind modes.
+
+**Out of scope — do NOT build:** any LLM call, form-field descriptions, screen summaries, Phase-2 execution, framework skill packs. Those are later specs. If the agent reaches for an LLM here, it has overstepped.
+
+---
+
+## 2. Why no LLM yet
+
+The failure every prior tool hit — clicking the same button repeatedly, opening/closing the same page, never terminating — is caused by **missing loop mechanics**, not weak reasoning: no memory of visited states, and no check that an action actually changed anything. Those are deterministic problems with deterministic fixes. We build and prove them with simple heuristics first. If the loop is sound without an LLM, adding the LLM later only improves *which* actions get prioritized — it can't reintroduce looping. This also keeps Layer 2 validation completely free.
+
+---
+
+## 3. Core concepts (build each, then the loop that uses them)
+
+### 3.1 State fingerprint
+Given an `ObservationResult`, compute a stable hash that answers "what screen am I on." Use a **structural signature**: the sorted multiset of `(role, accessible_name, is_overlay)` over interactive elements, plus the URL **path** (exclude query string and hash).
+
+- Deliberately **exclude volatile data** — field values, row contents, timestamps, counts — so the same screen in different data states produces the same fingerprint.
+- Tuning knob: if two genuinely different screens collide on one fingerprint, add `data-testid` into the signature; if one screen splits into many fingerprints over trivial differences, loosen it. Expose this as a small, documented function so it's easy to adjust.
+
+### 3.2 AppMap graph (persisted)
+- **ScreenNode:** fingerprint, url_path, element_count, first_seen, `observation_ref` (path to that screen's obs JSON), screenshot_ref.
+- **ActionEdge:** from_fingerprint, element descriptor (locator + role + name), action_type (`click` / `expand` / `select`), to_fingerprint, `caused_change` (bool).
+- Persist to **SQLite** (no Docker) and also dump an `appmap.json` snapshot.
+
+### 3.3 Frontier & visited (BFS)
+- `visited`: dict `fingerprint -> ScreenNode`.
+- `frontier`: queue of states with untried actions.
+- Loop: pop a state → make sure the browser is on it (§3.6) → `observe()` → for each untried ranked action: execute → observe → diff → record edge → enqueue new state if unseen → return to the state.
+
+### 3.4 Deterministic action ranking (NO LLM)
+Rank candidate actions with a simple, transparent heuristic:
+- **Prioritize:** buttons, links, tabs, menuitems, expanders (`aria-expanded=false`), the FAB.
+- **Score boosts:** has a non-null accessible_name; `role=button`; stable top-to-bottom / left-to-right order for determinism.
+- **Hard skip — danger blocklist** (case-insensitive substring match on name/text): `logout`, `sign out`, `delete`, `remove`, `deactivate`, `disable`, `reset`, `pay`, `transfer`, `approve`, `submit`. Make the list a config constant.
+- **Skip text inputs by default.** Exploration here = navigation + revealing UI, not data entry. (Typing is a later concern. Default OFF.)
+- Each element is tried **at most once per state** (track by element fingerprint within the state).
+
+### 3.5 State-diff — the anti-loop guard (the heart of this layer)
+After executing an action, re-observe and compute the new fingerprint:
+- **new == old** → the action did nothing navigational. Record the edge with `caused_change=false`, mark this `(state, element)` **dead**, and do NOT enqueue. *This is what stops the repeated-clicking.*
+- **new != old, unseen** → create a ScreenNode, record the edge, enqueue.
+- **new != old, already seen** → record the edge to the existing node, do NOT enqueue. *This is what stops the open/close-same-page loop.*
+
+### 3.6 Return-to-state
+Before trying the next action from state S, get back to S:
+- For overlays (menu/dialog open): press `Escape` or click the backdrop to close.
+- Otherwise: browser back → re-observe → if fingerprint ≠ S, fall back to **re-navigate from entry and replay the shortest known path to S** (keep BFS parent pointers so the path is known).
+- If S can't be restored after both attempts, log a `return_to_state_failure` and skip remaining actions for S rather than exploring from the wrong screen.
+
+### 3.7 Safety rails
+- Global **action budget** (default 200) and **max depth** (default 8) — the run must always terminate.
+- Danger blocklist (§3.4).
+- **Never submit forms** in this layer.
+- CLI flags: `--max-actions N`, `--max-depth N`, `--seeded waypoints.json`.
+- **Idempotent:** re-running on a static app reproduces the same node/edge counts.
+
+### 3.8 Modes
+- **Seeded mode:** accept an ordered waypoint list (selectors or accessible names to click in sequence — e.g. the bottom-right FAB → "Client" → into the form), then BFS-explore from wherever it lands. **This is the mode to run on the real portal first.**
+- **Blind BFS mode:** explore autonomously from the entry screen within budget.
+
+---
+
+## 4. Module structure
+
+```
+explorer/
+  explorer.py      # the BFS loop
+  state.py         # fingerprint(observation) -> str
+  appmap.py        # ScreenNode/ActionEdge, SQLite + JSON persistence
+  ranking.py       # deterministic action ranking + danger blocklist
+  navigation.py    # return-to-state / replay-shortest-path
+  schema.py        # dataclasses
+explore.py         # CLI: python explore.py <url> [--seeded f.json] [--max-actions N]
+```
+
+---
+
+## 5. Outputs
+- `appmap.sqlite` + `appmap.json` (the graph).
+- `appmap.mmd` — a Mermaid flowchart of discovered screens and transitions.
+- `run_log.json` — states visited, actions tried, dead actions, edges, return-to-state failures, skipped danger actions.
+
+---
+
+## 6. Acceptance tests (public MUI app, $0, NO LLM)
+
+Use a multi-state public MUI app (e.g. the MUI dashboard template, or any demo with tabs + a dialog + a menu). Each must print PASS/FAIL:
+
+1. **Explores breadth:** visited count > 1 and matches the obviously-distinct screens.
+2. **Terminates:** total actions ≤ budget; the run ends on its own (no infinite loop).
+3. **State-diff works:** dead actions (`caused_change=false`) are recorded and never retried — report the count.
+4. **No node duplication:** each fingerprint appears once as a node; re-encounters become edges, not new nodes.
+5. **Blocklist respected:** no logout/delete/etc. was clicked (verify via log).
+6. **Graph is connected & renders:** N nodes, M edges, Mermaid opens.
+7. **Idempotent:** two runs on the static demo give identical node/edge counts.
+
+---
+
+## 7. Real-app validation (private) → sanitized report
+
+On the portal, run **seeded mode** with the FAB → Client → form waypoints. Then send back **only** this summary — no app data, no labels, no URLs:
+
+```json
+{
+  "looped": false,
+  "node_count": 0,
+  "edge_count": 0,
+  "dead_actions": 0,
+  "max_depth_reached": 0,
+  "return_to_state_failures": 0,
+  "danger_actions_skipped": 0,
+  "terminated_naturally": true
+}
+```
+
+The two numbers I care most about: **`looped` must be false** and **`terminated_naturally` must be true.** If those hold on your real portal, the mechanics are proven and we move to Layer 3 (swap the deterministic ranker for LLM judgment + add form/screen summaries). If it loops or fails to terminate, the structural-fingerprint tuning (§3.1) is the lever, and the report tells me exactly where.
+
+---
+
+## 8. DO NOT
+- No LLM calls anywhere in this layer.
+- No form submission; no typing into fields by default.
+- No screen summaries or form descriptions (that's Layer 3).
+- No Phase-2 execution.
+- Do not containerize.
+- Keep `observe()` from Layer 1 read-only — the explorer acts, the observer only looks.
