@@ -1,0 +1,15 @@
+Two changes to the Layer 2 explorer before I run it on a real app:
+Add a termination_reason field to the run output, with two values: "frontier_exhausted" (ran out of new actions to try — map is complete) vs "budget_exhausted" (hit the action cap — map is incomplete). Also raise the default action budget to 500.
+Make return-to-state reuse the saved auth session. The reload-based recovery must reuse the persisted storage_state/cookies so a reload re-lands authenticated, never on a login page. If a reload lands on a login/SSO page, treat it as a return_to_state_failure and log it rather than continuing.
+Then I'll run it in seeded mode against my app with my own waypoints. After the run, output this summary only (no URLs, no labels, no data):
+{
+  "looped": false,
+  "terminated_naturally": true,
+  "termination_reason": "frontier_exhausted | budget_exhausted",
+  "node_count": 0,
+  "edge_count": 0,
+  "dead_actions": 0,
+  "max_depth_reached": 0,
+  "return_to_state_failures": 0,
+  "danger_actions_skipped": 0
+}
