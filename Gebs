@@ -137,3 +137,11 @@ The two numbers I care most about: **`looped` must be false** and **`terminated_
 - No Phase-2 execution.
 - Do not containerize.
 - Keep `observe()` from Layer 1 read-only — the explorer acts, the observer only looks.
+
+
+
+Layer 2 over-explores dropdowns — clicking all 55–70 options, with a full seed-replay reload between each. Three fixes:
+Duplicate-sibling cutoff. When exploring sibling list items (<li> / role=option / role=menuitem / table rows) under the same parent, after 3 consecutive siblings produce an already-known state, stop clicking the rest of that parent's siblings. Still record that the dropdown/list exists and capture its full option list from the DOM — just stop clicking every option.
+Per-list hard cap. Never click more than 5 items in any single list/dropdown, regardless of outcome.
+No reload between siblings. Selecting the next option in the same dropdown must NOT trigger a full seed-replay reload. Just close and reopen the dropdown in place. The reload-per-click is the main speed killer (~8–10s each).
+Keep the action budget at 500 and the termination_reason field. After the changes, I'll re-run seeded mode on my app and send the summary JSON
