@@ -1,0 +1,94 @@
+PROJECT: Refactor my QA dashboard's Release Health module from request-time Jira/qTest fetching to a production-grade background-sync architecture.
+
+CURRENT STACK: FastAPI backend, [Postgres/MySQL — FILL IN], Jira REST API, qTest API, [frontend framework — FILL IN].
+
+CURRENT PROBLEMS:
+- Dashboard fetches Jira/qTest live per request → slow first loads, 429 rate-limit errors, API breaking under query volume.
+- Backend throws "connection pool is full" errors under load.
+- Must serve 200+ concurrent users (directors/CEOs) with zero visible slowness or errors.
+
+====================================================
+NON-NEGOTIABLE ARCHITECTURE PRINCIPLES
+====================================================
+1. ZERO Jira/qTest API calls in any dashboard request path. Dashboard endpoints read ONLY from local DB (or Redis cache).
+2. A single background sync worker owns ALL outbound Jira/qTest traffic.
+3. All heavy metrics (release readiness score, burndown, health) are PRECOMPUTED during sync and stored — never computed per request.
+4. No request may ever hold a DB connection while waiting on any external I/O.
+5. Failure of any external dependency (Jira, qTest, Redis) must degrade gracefully — never a broken page, never a 500 to the user.
+
+====================================================
+A) SYNC WORKER (freshness layer)
+====================================================
+- APScheduler-based sync job. Scheduler must run in EXACTLY ONE process — use a Redis leader lock so multiple gunicorn workers don't double-sync.
+- Per active project: incremental sync every 3 min (1-2 min for projects with an active release). Jira JQL: project = X AND updated >= "-10m" (overlap window). qTest: last-modified filters. Upsert by Jira key / qTest ID.
+- JIRA WEBHOOKS for near-real-time freshness: POST /webhooks/jira receives issue created/updated/deleted events, worker applies them to DB within seconds. Polling remains as fallback for missed webhooks. Validate webhook payloads; process async (background task), respond 200 immediately.
+- Initial seed: one-time full paginated fetch per project, resumable via stored cursor/checkpoint, exponential backoff, honor Retry-After on 429.
+- Global token-bucket rate limiter on ALL outbound Jira/qTest calls; timeouts on every call; circuit breaker so a Jira/qTest outage never hangs the worker or app.
+- NIGHTLY FULL RECONCILIATION per project: compare local keys vs Jira/qTest key lists, remove/flag records deleted at source, log any drift found. Guarantees no permanent mismatch.
+- sync_state table: per-project cursor, last_synced_at, status, error message.
+- Structured logging per sync run: duration, items synced, API calls made, 429 count.
+
+====================================================
+B) SCHEMA
+====================================================
+- Normalized tables: jira_issues, jira_versions (releases), qtest_runs, qtest_cycles — indexed on project_id, fix_version, status, updated_at.
+- release_metrics: one row per (project, release, sync_timestamp) with readiness_score, burndown datapoint, pass/fail counts, open defect counts. Appending per sync gives burndown history for free.
+- Alembic migrations for all schema changes.
+
+====================================================
+C) REDIS (read-cache + coordination layer — NOT a freshness mechanism)
+====================================================
+- Cache-aside on dashboard read endpoints: key = endpoint+project+release+params, TTL 60s.
+- INVALIDATION: on every successful sync/webhook-apply for a project, delete all Redis keys for that project (prefix pattern). Refresh-button syncs also invalidate. Redis must never be staler than DB.
+- Redis failures non-fatal: if Redis is down, fall through to DB silently.
+- Redis also used for: scheduler leader lock, refresh-endpoint debounce lock.
+- NO Celery, no message queues — APScheduler + Redis is sufficient at this scale.
+
+====================================================
+D) API LAYER
+====================================================
+- All release-health endpoints: single indexed SELECTs against local tables / release_metrics. Target <100ms uncached, <20ms cached. No N+1 queries — verify with query logging.
+- Server-side pagination on all large lists (execution history, issue lists).
+- GET /sync/status/{project} → last_synced_at, sync state.
+- POST /sync/refresh/{project} → immediate incremental sync; debounced via Redis lock (if sync <60s ago or in progress, return in-progress status).
+- Per-user rate limiting (slowapi) so one misbehaving client can't starve others.
+- Response compression (gzip/brotli).
+- /health and /health/deep endpoints.
+
+====================================================
+E) CONNECTION POOL — ELIMINATE "pool is full" PERMANENTLY
+====================================================
+- Async DB driver only (asyncpg / SQLAlchemy 2.0 async). No sync DB calls anywhere in the event loop.
+- ONE engine/pool per worker process created at app startup (lifespan), never per-request engine creation.
+- Sessions acquired via FastAPI dependency with context manager — guaranteed release on every path including exceptions. Audit ALL existing code for connection leaks (sessions opened without close, engines created inside functions).
+- Connections held only for the duration of the query — never across external I/O, sleeps, or long computation. (Architecture already guarantees no Jira calls in request path; enforce the pattern everywhere else too.)
+- Pool sizing: per-worker pool_size ~10, max_overflow ~10, pool_timeout 30, pool_pre_ping=True, pool_recycle=1800. With 4-8 workers, ensure total (workers × (pool_size+overflow)) stays under the DB's max_connections — check and state the math explicitly.
+- The listener/execution-ingest path (Robot Framework listener writes) must use the same pooled engine, not ad-hoc connections.
+- Add pool metrics logging (checked-out connections, overflow, wait time) so pool pressure is visible before it errors.
+
+====================================================
+F) DEPLOYMENT & RUNTIME
+====================================================
+- gunicorn with 4-8 uvicorn workers.
+- Graceful shutdown: scheduler stops cleanly, in-flight syncs checkpoint, pools disposed.
+- Feature flag to keep old live-fetch path during rollout; remove after validation.
+- All secrets/config via environment variables.
+
+====================================================
+G) FRONTEND HARDENING
+====================================================
+- "Last synced: X min ago" badge + Refresh button (disabled while sync in progress, polls /sync/status).
+- Widgets load in parallel; skeleton loaders; per-widget error state with retry — one failed widget never blanks the page.
+- Debounce project/release selector; cancel in-flight requests on change (AbortController).
+- Retry with exponential backoff on failed calls.
+
+====================================================
+H) ACCEPTANCE GATES — NOT DONE UNTIL ALL PASS
+====================================================
+1. Load test (k6 or locust): 250 concurrent users, mixed endpoints, 10 min sustained → p95 < 300ms, error rate < 0.1%, ZERO pool-exhaustion errors in logs.
+2. Kill Redis mid-load-test → dashboard keeps serving from DB, no user-facing errors.
+3. Simulate Jira 429s/outage mid-sync → dashboard serves last-known data with stale indicator, worker recovers automatically.
+4. Reconciliation test: delete an issue in Jira (or mock it) → nightly job removes it locally.
+5. Grep/audit confirms zero Jira/qTest client calls in any request handler.
+
+Start by presenting: (1) proposed schema, (2) sync worker design, (3) connection/session management design, for my review BEFORE writing full implementation code.
