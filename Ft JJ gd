@@ -1,0 +1,229 @@
+You are a Principal Software Architect, Senior Python Engineer, and QA Automation Expert.
+
+I need you to analyze an existing QA automation framework and recommend the best architecture before writing any code.
+
+## Existing Framework
+
+The framework is already working in production.
+
+I do NOT want to rewrite the existing automation unless absolutely necessary.
+
+Current flow:
+
+1. Read Execution Excel.
+2. For each row:
+   - Generate JSON payload.
+   - Call REST API.
+   - Validate API response.
+   - Update Expected Trigger Value, Actual Trigger Value and Trigger Result (Pass/Fail).
+
+This framework is stable and should preferably remain unchanged.
+
+----------------------------------------------------
+
+## Files I am providing
+
+1. Master Excel
+2. Execution Excel
+3. Existing Python automation project
+
+Analyze all three.
+
+Do not make assumptions.
+
+----------------------------------------------------
+
+## Master Excel
+
+The Master Excel contains 20,000+ rows.
+
+Each row represents one UI field.
+
+It contains columns such as:
+
+- Field Name
+- Trigger Rule
+- Location
+- Type
+- Other metadata
+
+The workbook is shared across multiple teams.
+
+Only a filtered subset belongs to my application.
+
+Please determine:
+
+- Workbook structure
+- Sheet structure
+- Filter columns
+- Trigger Rule column
+- Relevant columns
+- Relationships between columns
+
+----------------------------------------------------
+
+## Execution Excel
+
+Execution Excel is currently created manually.
+
+Columns include (example only):
+
+- ID (TC_001, TC_002...)
+- Jurisdiction
+- Categories
+- document_req_name
+- expected_trigger_value
+- actual_trigger_value
+- trigger_result
+- many application input fields (these become the API payload)
+
+The automation reads this file.
+
+Each row represents one test case.
+
+After execution the same row is updated with:
+
+- Expected Trigger Value
+- Actual Trigger Value
+- Trigger Result
+
+Analyze exactly how this file is structured and how it is consumed.
+
+----------------------------------------------------
+
+## Current Manual Process
+
+Tester opens Master Excel.
+
+Reads Trigger Rule.
+
+Understands the business logic.
+
+Populates one or more rows in Execution Excel.
+
+Runs automation.
+
+This manual activity is the biggest bottleneck.
+
+----------------------------------------------------
+
+## Goal
+
+Completely remove manual creation of Execution Excel.
+
+----------------------------------------------------
+
+## IMPORTANT
+
+Before suggesting a solution, inspect the Trigger Rules.
+
+I do NOT know whether they are:
+
+- simple expressions
+- structured syntax
+- business English
+- mixed format
+- custom language
+
+Determine this by analyzing the Master Excel.
+
+----------------------------------------------------
+
+## Architecture Decision
+
+After analyzing the trigger rules, recommend ONE of these approaches:
+
+OPTION A
+
+Generate/update the Execution Excel automatically.
+
+Flow:
+
+Master Excel
+→ Analyze Trigger Rule
+→ Generate Execution Excel
+→ Existing Automation
+→ Update same Execution Excel with results
+
+OPTION B
+
+Remove Execution Excel as an input.
+
+Generate test cases in memory.
+
+Feed them directly into the existing payload generation.
+
+Write only the final report after execution.
+
+OPTION C
+
+Recommend another architecture if it is technically superior.
+
+Explain WHY.
+
+----------------------------------------------------
+
+## Constraints
+
+- Production-grade
+- Fast for 20,000+ rows
+- Minimal memory usage
+- Minimal code changes
+- Easy for QA users
+- Easy maintenance
+- Extensible
+- Reusable
+
+----------------------------------------------------
+
+## Performance
+
+Recommend caching wherever appropriate.
+
+Avoid repeated parsing.
+
+Avoid repeated Excel writes.
+
+Avoid unnecessary API calls.
+
+----------------------------------------------------
+
+## User Experience
+
+Recommend the simplest workflow for QA engineers.
+
+The user should ideally:
+
+1. Select/filter the required data (or let the tool do it automatically).
+2. Click Run.
+3. Wait for execution.
+4. Receive the final Execution Excel with:
+   - Expected Trigger Value
+   - Actual Trigger Value
+   - Trigger Result
+
+No other manual work should be required.
+
+----------------------------------------------------
+
+## Deliverables
+
+1. Analyze Master Excel.
+
+2. Analyze Execution Excel.
+
+3. Analyze existing Python framework.
+
+4. Explain how trigger rules are written.
+
+5. Decide which architecture (A, B or C) is best.
+
+6. Justify the decision.
+
+7. Estimate the implementation complexity.
+
+8. Only AFTER I approve the architecture should you generate code.
+
+Do NOT write implementation code yet.
+
+I want a detailed technical analysis and architecture recommendation first.
