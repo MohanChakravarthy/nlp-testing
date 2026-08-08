@@ -1,69 +1,80 @@
-We have now isolated the screenshot problem.
+Do not implement any of A/B/C/D/F yet.
 
-The important finding is:
+Based on our testing, we have confirmed:
 
-The Release Dashboard is rendered correctly inside the email-report iframe BEFORE screenshot conversion.
+1. The dashboard renders correctly in the iframe.
+2. The layout becomes corrupted only when domToPng() converts the DOM to PNG.
+3. Therefore the issue is with the DOM-to-image rendering path, not the dashboard's actual CSS layout.
 
-I inspected the iframe visually and there is NO overlapping there.
+From the options you identified, I want you to investigate Approach E (Playwright/Puppeteer) first, but DO NOT implement it yet.
 
-The problem appears only at this step:
+Our QA Dashboard is accessed through a server URL.
 
-Correct iframe DOM
-        ↓
-      domToPng()
-        ↓
-    Generated PNG
-        ↓
-❌ Text/layout overlapping
+Please investigate the feasibility of:
 
-For example, in the generated PNG:
-- RELEASE HEALTH → 94% overlaps the heading
-- RISKS / IMPEDIMENTS → "Inconsistent" overlaps the heading
-- RELEASE PIPELINE → Progress/legend elements overlap the surrounding content
+Server URL
+→ Playwright/Chromium
+→ render the actual QA Releases Dashboard
+→ wait for the page/data/fonts/charts to finish rendering
+→ take a native browser screenshot
+→ pass the PNG into our EXISTING email-report/.eml flow
 
-But these same elements look correctly positioned in the iframe immediately before domToPng() runs.
+Before making code changes, answer these questions:
 
-Therefore, we have confirmed that the dashboard's normal CSS/layout is not the primary problem.
+1. Where is the current screenshot generated — frontend or backend?
 
-Do NOT change:
+2. What exact server URL is used to access the QA Dashboard?
+
+3. How does the QA Dashboard authenticate?
+   - SSO?
+   - cookies?
+   - JWT?
+   - localStorage/sessionStorage?
+   - other?
+
+4. Can Playwright access the same authenticated dashboard without storing or exposing user credentials?
+
+5. Can Playwright reuse the existing authenticated session safely if required?
+
+6. Does our backend already have Playwright/Puppeteer/Chromium available?
+
+7. What would be the impact of running Chromium on the server?
+   - memory
+   - CPU
+   - concurrency
+   - deployment requirements
+
+8. Most importantly, create a SMALL proof-of-concept only if feasible:
+   
+   Server URL
+   → Playwright Chromium
+   → authenticated Releases Dashboard
+   → wait for rendering
+   → native screenshot
+
+   Do not modify the production email flow yet.
+
+9. Compare the Playwright screenshot against the current domToPng screenshot.
+
+I want to see whether Playwright produces the correct screenshot while domToPng produces the overlapping screenshot.
+
+DO NOT change:
 - dashboard CSS
-- card heights
-- iframe width
+- iframe CSS
 - browser zoom
-- responsive breakpoints
-- margins/padding
-- overflow
-- release dashboard component layout
+- card dimensions
+- existing .eml generation
+- MIME/Content-ID implementation
 
-Those are not the root cause we are investigating now.
+The purpose of this step is only to establish whether native Chromium screenshot is a reliable replacement for domToPng in our architecture.
 
-The problem is specifically the DOM-to-PNG conversion performed by domToPng.
+After the investigation, report:
 
-I want you to now investigate why domToPng is changing the visual layout during conversion.
+A. Is Playwright feasible?
+B. Can it access our server URL?
+C. Can authentication be handled securely?
+D. Does the Playwright screenshot eliminate the overlapping?
+E. What changes would be required to move screenshot generation to Playwright?
+F. Any performance/deployment concerns?
 
-Before making any fix, tell me:
-
-1. Which domToPng package/library are we using?
-2. What version?
-3. What exact domToPng() call/options are being used?
-4. Does the library clone/reconstruct the DOM internally?
-5. How does it handle:
-   - fonts
-   - computed CSS
-   - flex/grid
-   - transforms
-   - CSS variables
-   - SVG
-   - pseudo-elements
-   - devicePixelRatio
-   - scaling
-   - percentage dimensions
-6. Why could an element that is correctly positioned in the iframe become overlapping only after domToPng conversion?
-
-Do not implement a fix yet.
-
-First give me the technical root-cause analysis of the domToPng conversion issue.
-
-After we understand that, we will decide whether to:
-A. configure/fix domToPng, or
-B. replace domToPng with a native browser screenshot approach such as Playwright.
+Do not implement the production replacement until I review these findings.
