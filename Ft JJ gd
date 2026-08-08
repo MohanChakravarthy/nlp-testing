@@ -1,31 +1,418 @@
-QA Dashboard - Multi-Team Workspace Architecture
-Background
-Our QA Dashboard was originally built for a single internal team. After logging in through LDAP, every authenticated user could see all Groups, Projects, Releases, Defects, Test Runs, etc.
-This worked because only one team was using the application.
-Now the application is being rolled out to multiple teams across the organization.
-This introduces a major security and usability problem.
-Current Problems
-Every LDAP authenticated user can see every configured project.
-Teams should never see another team's Jira/QTest configuration.
-Teams should only access their own dashboard.
-New users currently have no onboarding flow.
-Project configuration currently requires backend/API support instead of being completely self-service.
-The application is not designed as an enterprise multi-tenant SaaS product.
-Goal
-Transform QA Dashboard into a multi-workspace enterprise application where every team owns its own isolated workspace.
-Each workspace contains:
-App Code
-Jira Issue Key
-QTest ID
-Jira Token
-QTest Token
-Dashboard Data
-Releases
-Bugs
-Test Runs
-Reports
+Fix Release Dashboard Email Report Screenshot Rendering
 
+We already have an Email Report feature in the QA Dashboard → Releases Dashboard section.
 
+Current functionality — DO NOT BREAK
 
+When the user clicks the email icon:
 
-No workspace can access another workspace's data.
+1. The system shows a "Preparing report..." state.
+2. It generates a screenshot/snapshot of the release dashboard.
+3. The screenshot is embedded inline inside the email body — it should NOT appear as a normal attachment.
+4. An ".eml" file is generated and downloaded.
+5. The ".eml" can be opened and the release dashboard snapshot is visible inside the email body.
+
+This functionality is already working.
+
+Current problem
+
+The generated release dashboard snapshot sometimes has text overlapping, alignment issues, and layout/rendering problems, particularly when the user's browser is at:
+
+- 90% zoom
+- 67% zoom
+
+The same dashboard may look correct at 100%, but the generated email snapshot can contain overlapping text or incorrectly positioned elements.
+
+I have been debugging this issue and do NOT want a workaround that simply targets 67% or 90%.
+
+---
+
+Required solution
+
+The email screenshot generation must be independent of the user's current browser zoom and interactive dashboard viewport.
+
+IMPORTANT
+
+Do NOT change the user's browser zoom.
+
+Do NOT implement:
+
+67% → change browser to 100% → take screenshot → restore 67%
+
+and do not use similar approaches.
+
+The user's dashboard should remain completely unchanged while the report is being generated.
+
+---
+
+Recommended architecture
+
+Analyze the existing implementation and implement a dedicated rendering path for the email report:
+
+User clicks Email Report
+        ↓
+Show "Preparing report..."
+        ↓
+Create/render a dedicated Email Report layout
+        ↓
+Use a fixed viewport / fixed report width
+        ↓
+Do NOT depend on user's browser zoom
+        ↓
+Wait for fonts, images and layout to fully render
+        ↓
+Capture screenshot
+        ↓
+Embed screenshot inline in email body
+        ↓
+Generate .eml
+        ↓
+Download .eml
+        ↓
+Dashboard remains untouched
+
+The email report can reuse the same release data and visual design, but its layout should be deterministic and optimized for screenshot/email rendering.
+
+---
+
+Step 1 — Analyze the existing implementation first
+
+Before changing code, inspect the complete current flow:
+
+- Email Report button/icon
+- "Preparing report" state
+- Screenshot generation
+- DOM element being captured
+- Screenshot library/tool being used
+- ".eml" generation
+- MIME structure
+- Inline image / Content-ID implementation
+- Release dashboard React components
+- Relevant CSS/Tailwind styles
+- Any responsive breakpoints
+- Any "transform", "scale", fixed heights, absolute positioning, flex/grid constraints
+- Any "html2canvas", Playwright, browser screenshot, or equivalent implementation
+
+Identify the actual root cause of the overlap rather than adding zoom-specific CSS hacks.
+
+Do not immediately modify code before understanding the current implementation.
+
+---
+
+Step 2 — Create a deterministic email-report rendering environment
+
+The email report screenshot should use a dedicated rendering environment.
+
+Use a fixed report width such as approximately:
+
+1200px–1440px
+
+Choose the value that best fits the existing application and email layout.
+
+The root report container should have deterministic dimensions, for example:
+
+width: 1200px;
+min-width: 1200px;
+max-width: 1200px;
+box-sizing: border-box;
+
+Do not allow the report layout to depend on:
+
+window.innerWidth
+window.devicePixelRatio
+current browser zoom
+current dashboard responsive breakpoint
+
+unless technically required by the screenshot implementation.
+
+---
+
+Step 3 — Prevent layout-related text overlap
+
+Inspect the release dashboard CSS carefully.
+
+Look specifically for:
+
+- Fixed "height" on containers containing dynamic text
+- "overflow: hidden"
+- "position: absolute"
+- "transform"
+- "scale"
+- "translate"
+- Flexbox containers with constrained dimensions
+- Grid columns with incorrect sizing
+- "white-space: nowrap"
+- "text-overflow"
+- Incorrect "line-height"
+- Percentage-based heights
+- "vh"-based sizing
+- Responsive breakpoint-dependent dimensions
+- Nested elements with conflicting width/height constraints
+
+Dynamic text should be allowed to wrap naturally.
+
+Prefer:
+
+height: auto;
+min-height: ...;
+overflow-wrap: anywhere;
+word-break: break-word;
+white-space: normal;
+
+where appropriate.
+
+Do NOT blindly remove existing styles. Determine which styles are actually responsible for the overlap.
+
+---
+
+Step 4 — Do not use CSS hacks for 67% or 90%
+
+Do NOT create fixes such as:
+
+@media (...) {
+   ...
+}
+
+specifically to handle browser zoom levels.
+
+Do NOT create separate logic such as:
+
+if (zoom === 0.67) ...
+if (zoom === 0.9) ...
+
+The solution must work consistently regardless of whether the user is currently at:
+
+50%
+67%
+75%
+80%
+90%
+100%
+110%
+125%
+150%
+
+The email screenshot should look essentially identical in all cases.
+
+---
+
+Step 5 — Ensure fonts are loaded before screenshot
+
+Before taking the screenshot, ensure all web fonts have finished loading.
+
+If supported by the implementation, wait for:
+
+await document.fonts.ready;
+
+Also ensure images/logos/icons used by the report have finished loading.
+
+Wait for the layout to stabilize before capturing.
+
+Use appropriate render-frame waits if required.
+
+The goal is:
+
+DOM created
+   ↓
+Fonts loaded
+   ↓
+Images loaded
+   ↓
+React rendering completed
+   ↓
+Layout stabilized
+   ↓
+Screenshot
+
+Do not capture while the page is still rendering.
+
+---
+
+Step 6 — Email snapshot should be a dedicated report view
+
+Prefer creating a dedicated component similar to:
+
+ReleaseEmailSnapshot
+
+or equivalent according to the existing architecture.
+
+It should use the same release data as the dashboard but be optimized for:
+
+- fixed dimensions
+- clean spacing
+- predictable text wrapping
+- readable typography
+- stable alignment
+- screenshot rendering
+- email viewing
+
+The interactive dashboard should continue to behave exactly as it does today.
+
+For example:
+
+Interactive Release Dashboard
+        │
+        ├── Existing dashboard UI
+        │
+        └── Email Report Renderer
+                │
+                └── Fixed deterministic layout
+
+Do not duplicate business/data logic unnecessarily. Reuse existing release data and components where practical.
+
+---
+
+Step 7 — Preserve the inline email image
+
+The current ".eml" functionality is working, so preserve it.
+
+The screenshot should continue to be embedded inline in the email body, not exposed as a regular attachment.
+
+Maintain the existing MIME/Content-ID approach if that is what the application currently uses.
+
+The final email should effectively behave like:
+
+<body>
+    ...
+    <img src="cid:release-report" />
+    ...
+</body>
+
+with the corresponding inline MIME image.
+
+Do not replace the working ".eml" implementation unless there is a genuine technical problem.
+
+---
+
+Step 8 — User experience
+
+When the user clicks Email Report:
+
+Email icon clicked
+        ↓
+Preparing report...
+        ↓
+Generate report in background
+        ↓
+Generate .eml
+        ↓
+Download
+
+The actual dashboard must NOT:
+
+- zoom in/out
+- resize visibly
+- flicker
+- scroll unexpectedly
+- change responsive layout
+- change user's selected filters/state
+- change user's browser zoom
+
+The user should be able to continue seeing the dashboard normally.
+
+---
+
+Step 9 — Test thoroughly
+
+After implementing the fix, test the Email Report functionality at minimum at:
+
+Browser zoom:
+67%
+75%
+80%
+90%
+100%
+110%
+125%
+
+Also test different:
+
+- release names
+- long release names
+- long project names
+- long environment names
+- long status values
+- different defect counts
+- different QA/test counts
+- empty values
+- large numbers
+- multiple releases if applicable
+- different screen resolutions
+
+For every zoom level, verify:
+
+Screenshot
+
+- No text overlap
+- No clipped text
+- No broken alignment
+- No unexpected wrapping
+- No missing elements
+- No duplicated elements
+- No distorted icons
+- No incorrect spacing
+- No horizontal clipping
+- No vertical clipping
+
+".eml"
+
+Open the generated ".eml" and verify:
+
+- Image appears inside the email body
+- Image is not shown as a normal attachment
+- Screenshot is sharp and readable
+- Layout is consistent
+- Text is not overlapping
+- MIME/Content-ID still works
+- ".eml" downloads successfully
+
+---
+
+Step 10 — Compare before and after
+
+Before making the final change, identify the root cause and explain it briefly.
+
+Then provide:
+
+1. Root cause
+2. Files/components changed
+3. Why the overlap occurred
+4. Why the new approach is independent of browser zoom
+5. How the screenshot is now rendered
+6. How ".eml" generation remains unchanged
+7. Testing performed at 67%, 90%, and 100% at minimum
+
+---
+
+Important constraints
+
+DO
+
+- Preserve existing functionality
+- Reuse existing data/business logic
+- Make screenshot generation deterministic
+- Use a fixed rendering width
+- Wait for fonts/images/layout
+- Separate email rendering from interactive dashboard rendering
+- Fix the underlying layout problem
+- Keep the inline image inside the ".eml"
+
+DO NOT
+
+- Change browser zoom
+- Restore browser zoom after screenshot
+- Add hacks specifically for 67% or 90%
+- Break the existing ".eml" generation
+- Convert the inline screenshot into a normal attachment
+- Modify unrelated dashboard functionality
+- Hide the overlap using "overflow: hidden"
+- Solve dynamic text problems by simply increasing arbitrary fixed heights
+- Rewrite the entire feature unnecessarily
+
+Final goal
+
+The release email report must be pixel-stable and deterministic regardless of the user's current browser zoom.
+
+The user's browser zoom should have zero impact on the generated email screenshot.
+
+First analyze the existing implementation and identify the root cause. Then implement the smallest production-quality change that achieves this behavior.
